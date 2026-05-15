@@ -1,0 +1,5 @@
+node_modules
+dist
+apps/map-ui/node_modules
+apps/map-ui/dist
+.git

@@ -1,0 +1,142 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: sirat-redis
+    ports:
+      - "6379:6379"
+
+  core-api-1:
+    build: .
+    container_name: sirat-core-api-1
+    env_file:
+      - .env
+    environment:
+      PORT: 3000
+      INSTANCE_ID: core-api-1
+      REDIS_URL: redis://redis:6379
+      LOCATION_SERVICE_URL: http://location-service:4001
+    command: npm run dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - redis
+      - location-service
+
+  core-api-2:
+    build: .
+    container_name: sirat-core-api-2
+    env_file:
+      - .env
+    environment:
+      PORT: 3000
+      INSTANCE_ID: core-api-2
+      REDIS_URL: redis://redis:6379
+      LOCATION_SERVICE_URL: http://location-service:4001
+    command: npm run dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - redis
+      - location-service
+
+  location-service:
+    build: .
+    container_name: sirat-location-service
+    env_file:
+      - .env
+    environment:
+      LOCATION_SERVICE_PORT: 4001
+      REDIS_URL: redis://redis:6379
+    command: npm run location:dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - redis
+    ports:
+      - "4001:4001"
+
+
+  ride-timeout-scheduler:
+    build: .
+    container_name: sirat-ride-timeout-scheduler
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      LOCATION_SERVICE_URL: http://location-service:4001
+    command: npm run worker:ride-timeout
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - redis
+      - location-service
+
+  
+  dispatch-worker:
+    build: .
+    container_name: sirat-dispatch-worker
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      LOCATION_SERVICE_URL: http://location-service:4001
+    command: npm run worker:dispatch
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - redis
+      - location-service
+
+
+  nginx:
+    image: nginx:alpine
+    container_name: sirat-nginx
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./nginx/sirat.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - core-api-1
+      - core-api-2
+  
+  k6:
+    image: grafana/k6:latest
+    profiles:
+      - loadtest
+    environment:
+      BASE_URL: http://nginx:8080
+    volumes:
+      - ./load-tests:/scripts:ro
+    command: run /scripts/ride-create.k6.js
+    depends_on:
+      - nginx
+
+
+  k6-nearby:
+    image: grafana/k6:latest
+    profiles:
+      - loadtest
+    environment:
+      BASE_URL: http://nginx:8080
+    volumes:
+      - ./load-tests:/scripts:ro
+    command: run /scripts/drivers-nearby.k6.js
+    depends_on:
+      - nginx
+
+  k6-mixed:
+    image: grafana/k6:latest
+    profiles:
+      - loadtest
+    environment:
+      BASE_URL: http://nginx:8080
+    volumes:
+      - ./load-tests:/scripts:ro
+    command: run /scripts/dispatch-mixed.k6.js
+    depends_on:
+      - nginx
