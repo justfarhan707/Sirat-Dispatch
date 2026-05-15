@@ -88,6 +88,21 @@ export const findNearbyDriversByRing = async (
 
 };
 
+export const listDriversForConsole = async () => {
+    const drivers = await Driver.find({})
+        .select("_id name phone vehicle rating isAvailable availabilityStatus currentRide")
+        .sort({ createdAt: 1 })
+        .limit(100)
+        .lean();
+
+    return drivers.sort((a: any, b: any) => {
+        const aNumber = Number(String(a.name).replace(/\D/g, ""));
+        const bNumber = Number(String(b.name).replace(/\D/g, ""));
+
+        return aNumber - bNumber;
+    });
+};
+
 
 
 export const findNearbyDriverMarkersByRing = async (

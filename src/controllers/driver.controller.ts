@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import * as driverService from "../services/driver.service";
+import * as rideService from "../services/ride.service";
 import { publishDriverLocationUpdated } from "../pubsub/driverLocation.pubsub";
 import { enqueueDriverEmbeddingJob } from "../queues/driverEmbedding.queue";
 
@@ -55,6 +56,17 @@ export const getNearbyDriver = async (req: Request, res: Response) => {
         res.status(500).json({ message: "server error" })
     }
 }
+
+export const listDrivers = async (_req: Request, res: Response) => {
+    try {
+        const drivers = await driverService.listDriversForConsole();
+
+        return res.json({ drivers });
+    } catch (err) {
+        console.error("listDrivers error:", err);
+        return res.status(500).json({ message: "server error" });
+    }
+};
 
 
 export const updateDriverLocation = async (req: Request, res: Response) => {
@@ -175,6 +187,23 @@ export const matchDrivers = async (req: Request, res: Response) => {
 
         return res.json(matchedDrivers);
     } catch (err) {
+        return res.status(500).json({ message: "server error" });
+    }
+};
+
+export const getActiveRideForDriver = async (req: Request, res: Response) => {
+    try {
+        const { id } = req.params;
+
+        if (!id) {
+            return res.status(400).json({ message: "Driver id is required" });
+        }
+
+        const ride = await rideService.getActiveRideForDriver(id as string);
+
+        return res.json({ ride });
+    } catch (err) {
+        console.error("getActiveRideForDriver error:", err);
         return res.status(500).json({ message: "server error" });
     }
 };

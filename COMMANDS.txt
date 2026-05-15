@@ -1,0 +1,130 @@
+SIRAT COMMANDS
+==============
+
+Run these from C:\sirat unless a command says otherwise.
+
+
+BACKEND DOCKER STACK
+--------------------
+
+Start all backend services:
+docker compose up --build
+
+Starts Redis, location-service, two core APIs, nginx, dispatch worker, and ride timeout scheduler.
+
+Start existing containers without rebuilding:
+docker compose up
+
+Stop backend services:
+docker compose down
+
+Check running containers:
+docker ps
+
+
+DRIVER SIMULATOR
+----------------
+
+Run simulator locally:
+npm run simulator:drivers
+
+Moves available drivers and pushes live locations into the location service.
+
+
+FRONTEND
+--------
+
+Run map UI through nginx/load balancer:
+cd C:\sirat\apps\map-ui
+npm run dev:lb
+
+Open:
+http://localhost:5173/
+
+Driver offer console:
+http://localhost:5173/?view=driver
+
+Build frontend:
+cd C:\sirat\apps\map-ui
+npm run build
+
+
+LOAD-TEST CLEANUP
+-----------------
+
+Preview load-test cleanup:
+npm run reset:loadtest
+
+Delete load-test rides and release matching drivers:
+npm run reset:loadtest -- --confirm
+
+Use this before and after k6 runs.
+
+
+K6 LOAD TESTS
+-------------
+
+Mixed dispatch test:
+docker compose --profile loadtest run --rm k6-mixed
+
+Runs mixed traffic: mostly GET /drivers/nearby, some POST /rides.
+
+Nearby drivers read test:
+docker compose --profile loadtest run --rm k6-nearby
+
+Tests GET /drivers/nearby throughput and latency.
+
+Ride create test:
+docker compose --profile loadtest run --rm k6
+
+Tests POST /rides creation and dispatch queueing.
+
+
+RECOMMENDED LOAD-TEST FLOW
+--------------------------
+
+1. Start backend:
+docker compose up --build
+
+2. In another terminal, start simulator:
+npm run simulator:drivers
+
+3. In another terminal, clean old test rides:
+npm run reset:loadtest -- --confirm
+
+4. Run mixed test:
+docker compose --profile loadtest run --rm k6-mixed
+
+5. Clean again after test:
+npm run reset:loadtest -- --confirm
+
+
+USEFUL CHECKS
+-------------
+
+Check nginx load balancing response headers:
+1..10 | ForEach-Object {
+  curl.exe -s -D - "http://localhost:8080/drivers/nearby?lat=19.07&lng=73&ring=2" -o NUL |
+  Select-String "X-Instance-Id"
+}
+
+You should see both core-api-1 and core-api-2.
+
+Check nearby drivers directly:
+curl.exe "http://localhost:8080/drivers/nearby?lat=19.07&lng=73&ring=2"
+
+
+GIT
+---
+
+Check changes:
+git status
+
+Add all changes:
+git add .
+
+Commit:
+git commit -m "Your message"
+
+Push:
+git push

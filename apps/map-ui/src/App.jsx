@@ -9,6 +9,7 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:3000";
 const REFRESH_INTERVAL_MS = 15000;
 const ACTIVE_RIDE_REFRESH_INTERVAL_MS = 1000;
 const MAP_RING = 2;
+const DEFAULT_SEMANTIC_QUERY = "I want a quick English speaking driver";
 
 const pickup = {
   lat: 19.07,
@@ -19,6 +20,41 @@ const dropoff = {
   lat: 19.078,
   lng: 73.01,
 };
+
+const rideOptions = [
+  {
+    id: "bike",
+    label: "Bike",
+    description: "Zip through traffic",
+    eta: "1 min",
+    price: "₹82",
+    icon: "B",
+  },
+  {
+    id: "mini",
+    label: "Mini",
+    description: "Compact everyday ride",
+    eta: "3 min",
+    price: "₹219",
+    icon: "M",
+  },
+  {
+    id: "sedan",
+    label: "Prime Sedan",
+    description: "Top rated comfortable cars",
+    eta: "4 min",
+    price: "₹289",
+    icon: "S",
+  },
+  {
+    id: "suv",
+    label: "Prime SUV",
+    description: "More room for people and bags",
+    eta: "6 min",
+    price: "₹392",
+    icon: "X",
+  },
+];
 
 const driverIcon = L.divIcon({
   className: "driver-marker",
@@ -61,7 +97,7 @@ function getRideLabel(ride) {
   }
 
   if (ride.status === "searching") {
-    return "Searching for supply";
+    return "Finding your driver";
   }
 
   if (ride.status === "no_driver_found") {
@@ -79,6 +115,22 @@ function getRideLabel(ride) {
   return ride.status;
 }
 
+function getRideTone(ride) {
+  if (!ride) {
+    return "idle";
+  }
+
+  if (["assigned", "ongoing", "completed"].includes(ride.status)) {
+    return "good";
+  }
+
+  if (["no_driver_found", "cancelled"].includes(ride.status)) {
+    return "warn";
+  }
+
+  return "active";
+}
+
 function getAssignedDriverFromRide(ride) {
   if (!ride?.assignedDriver || typeof ride.assignedDriver === "string") {
     return null;
@@ -88,13 +140,22 @@ function getAssignedDriverFromRide(ride) {
 }
 
 function App() {
+  const appView =
+    new URLSearchParams(window.location.search).get("view") === "driver"
+      ? "driver"
+      : "rider";
   const [drivers, setDrivers] = useState([]);
+  const [driverDirectory, setDriverDirectory] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [currentRide, setCurrentRide] = useState(null);
   const [assignedDriver, setAssignedDriver] = useState(null);
+  const [selectedDriverId, setSelectedDriverId] = useState("");
   const [matchingMode, setMatchingMode] = useState("standard");
+  const [semanticQuery, setSemanticQuery] = useState(DEFAULT_SEMANTIC_QUERY);
+  const [selectedRideOption, setSelectedRideOption] = useState("mini");
+  const [bookingPhase, setBookingPhase] = useState("route");
   const [actionState, setActionState] = useState("idle");
-  const [notice, setNotice] = useState("Live drivers are streaming from Redis.");
+  const [notice, setNotice] = useState("Choose a ride style and request a driver.");
   const [now, setNow] = useState(Date.now());
   const [areaH3Indexes, setAreaH3Indexes] = useState([]);
   const driversRef = useRef([]);
@@ -148,6 +209,41 @@ function App() {
     }
   };
 
+  const fetchDriverDirectory = async () => {
+    try {
+      const res = await fetch(`${CORE_API_URL}/drivers`);
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.message || "Driver directory request failed");
+      }
+
+      const directory = data.drivers || [];
+
+      setDriverDirectory(directory);
+
+      if (directory.length === 0) {
+        setNotice("Driver directory is empty. Seed drivers or check Mongo.");
+      }
+    } catch (error) {
+      console.error("Failed to fetch driver directory:", error);
+
+      setDriverDirectory((currentDirectory) => {
+        if (currentDirectory.length > 0) {
+          return currentDirectory;
+        }
+
+        return driversRef.current;
+      });
+
+      setNotice(
+        driversRef.current.length > 0
+          ? "Fixed driver directory failed, using live nearby drivers for now. Rebuild Docker for /drivers."
+          : "Could not load fixed driver directory. Rebuild Docker and make sure Mongo has seeded drivers."
+      );
+    }
+  };
+
 
   useEffect(() => {
     let intervalId;
@@ -193,6 +289,14 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (appView !== "driver") {
+      return;
+    }
+
+    fetchDriverDirectory();
+  }, [appView]);
+
+  useEffect(() => {
     const intervalId = setInterval(() => {
       setNow(Date.now());
     }, 1000);
@@ -228,6 +332,31 @@ function App() {
     }
 
     return freshRide;
+  };
+
+  const fetchActiveRideForDriver = async (driverId) => {
+    const res = await fetch(`${CORE_API_URL}/drivers/${driverId}/active-ride`);
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(data.message || "Failed to fetch driver offer");
+    }
+
+    const activeRide = data.ride;
+    const activeAssignedDriver = getAssignedDriverFromRide(activeRide);
+
+    setCurrentRide(activeRide);
+    setAssignedDriver(activeAssignedDriver);
+
+    if (activeRide?.status === "assigned") {
+      setNotice("New ride offer received. Accept before the countdown ends.");
+    } else if (activeRide?.status === "ongoing") {
+      setNotice("Ride accepted. Complete it when the trip is done.");
+    } else {
+      setNotice("Waiting for the next dispatch offer...");
+    }
+
+    return activeRide;
   };
 
   useEffect(() => {
@@ -315,6 +444,41 @@ function App() {
     return () => clearInterval(intervalId);
   }, [currentRide?._id, currentRide?.status]);
 
+  useEffect(() => {
+    if (selectedDriverId || driverDirectory.length === 0) {
+      return;
+    }
+
+    setSelectedDriverId(String(driverDirectory[0]._id));
+  }, [driverDirectory, selectedDriverId]);
+
+  useEffect(() => {
+    if (appView !== "driver" || !selectedDriverId) {
+      return;
+    }
+
+    let isActive = true;
+
+    const refreshDriverOffer = async () => {
+      try {
+        if (isActive) {
+          await fetchActiveRideForDriver(selectedDriverId);
+        }
+      } catch (error) {
+        console.error("Failed to refresh driver offer:", error);
+        setNotice("Could not refresh driver offers.");
+      }
+    };
+
+    refreshDriverOffer();
+    const intervalId = setInterval(refreshDriverOffer, ACTIVE_RIDE_REFRESH_INTERVAL_MS);
+
+    return () => {
+      isActive = false;
+      clearInterval(intervalId);
+    };
+  }, [appView, selectedDriverId]);
+
   const createRide = async () => {
     setActionState("creating");
     setNotice("Creating ride request through Core API...");
@@ -330,7 +494,7 @@ function App() {
           dropoff,
           query:
             matchingMode === "semantic"
-              ? "I want a quick English speaking driver"
+              ? semanticQuery.trim() || DEFAULT_SEMANTIC_QUERY
               : "",
           matchingMode,
         }),
@@ -509,201 +673,417 @@ function App() {
       )
       : null;
 
+  const assignedVehicle = assignedDriver?.vehicle?.type || "driver";
+  const heroStatus = getRideLabel(currentRide);
+  const heroTone = getRideTone(currentRide);
+  const selectedOption = rideOptions.find((option) => option.id === selectedRideOption);
+  const showRideChoices = bookingPhase === "rides";
+
+  if (appView === "driver") {
+    const selectedDriver = driverDirectory.find(
+      (driver) => String(driver._id) === String(selectedDriverId)
+    ) || assignedDriver;
+    const driverOptions = [...driverDirectory];
+
+    if (
+      assignedDriver &&
+      !driverOptions.some((driver) => String(driver._id) === String(assignedDriver._id))
+    ) {
+      driverOptions.unshift(assignedDriver);
+    }
+
+    return (
+      <main className="driver-app-shell">
+        <section className="driver-console">
+          <header className="driver-console-nav">
+            <div className="brand-lockup">
+              <div className="brand-mark">S</div>
+              <div>
+                <p>Sirat Driver</p>
+                <strong>Offer Console</strong>
+              </div>
+            </div>
+
+            <a href="/" className="view-link">Rider view</a>
+          </header>
+
+          <div className="driver-console-grid">
+            <aside className="driver-selector-card">
+              <p className="eyebrow">Driver mode</p>
+              <h1>Ready for offers?</h1>
+              <p className="lede">
+                Pick a live driver and watch assignments arrive from the dispatch worker.
+              </p>
+
+              <label className="driver-select">
+                <span>Active driver</span>
+                <select
+                  value={selectedDriverId}
+                  onChange={(event) => {
+                    setSelectedDriverId(event.target.value);
+                    setCurrentRide(null);
+                    setAssignedDriver(null);
+                  }}
+                >
+                  {driverOptions.map((driver) => (
+                    <option key={driver._id} value={driver._id}>
+                      {driver.name} · {driver.vehicle?.type || "vehicle"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {selectedDriver ? (
+                <div className="driver-profile-card">
+                  <div className="driver-avatar">
+                    {selectedDriver.name?.charAt(0) || "D"}
+                  </div>
+                  <div>
+                    <small>Signed in as</small>
+                    <strong>{selectedDriver.name}</strong>
+                    <p>
+                      {selectedDriver.vehicle?.type || "vehicle"} ·{" "}
+                      {selectedDriver.rating?.toFixed(2) || "--"} rating
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p className="empty-state">Start the simulator to load live drivers.</p>
+              )}
+
+              <div className="notice-row">
+                <span>{lastUpdated || "--"}</span>
+                <p>{notice}</p>
+              </div>
+            </aside>
+
+            <section className={`offer-card ${heroTone}`}>
+              <div className="section-heading">
+                <span>Incoming offer</span>
+                <strong>{currentRide?.status || "waiting"}</strong>
+              </div>
+
+              {secondsUntilTimeout !== null && (
+                <div className="driver-countdown">
+                  <span>Respond in</span>
+                  <strong>{secondsUntilTimeout}s</strong>
+                </div>
+              )}
+
+              {currentRide ? (
+                <>
+                  <div className="offer-route">
+                    <div>
+                      <small>Pickup</small>
+                      <strong>Vashi Plaza</strong>
+                      <p>{currentRide.pickup?.lat}, {currentRide.pickup?.lng}</p>
+                    </div>
+                    <div>
+                      <small>Dropoff</small>
+                      <strong>Palm Beach Road</strong>
+                      <p>{currentRide.dropoff?.lat}, {currentRide.dropoff?.lng}</p>
+                    </div>
+                  </div>
+
+                  <div className="response-actions driver-actions">
+                    <button
+                      disabled={!canRespond || actionState !== "idle"}
+                      onClick={acceptRide}
+                      type="button"
+                    >
+                      Accept offer
+                    </button>
+                    <button
+                      disabled={!canRespond || actionState !== "idle"}
+                      onClick={rejectRide}
+                      type="button"
+                    >
+                      Reject
+                    </button>
+                    <button
+                      disabled={!canComplete || actionState !== "idle"}
+                      onClick={completeRide}
+                      type="button"
+                    >
+                      Complete ride
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="waiting-offer">
+                  <span />
+                  <strong>Waiting for dispatch</strong>
+                  <p>Request a ride from the rider view and this driver will receive it here if assigned.</p>
+                </div>
+              )}
+            </section>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
-      <section className="map-panel">
-        <MapContainer
-          center={[pickup.lat, pickup.lng]}
-          zoom={13}
-          scrollWheelZoom
-          className="map"
-        >
-          <TileLayer
-            attribution="&copy; OpenStreetMap contributors"
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-
-          <Marker position={[pickup.lat, pickup.lng]} icon={pickupIcon}>
-            <Popup>Pickup point</Popup>
-          </Marker>
-
-          <Marker position={[dropoff.lat, dropoff.lng]} icon={dropoffIcon}>
-            <Popup>Dropoff point</Popup>
-          </Marker>
-
-          {drivers.map((driver) => {
-            const live = driver.liveLocation;
-
-            if (!live) {
-              return null;
-            }
-
-            return (
-              <Marker
-                key={driver._id}
-                position={[live.lat, live.lng]}
-                icon={driverIcon}
-              >
-                <Popup>
-                  <strong>{driver.name}</strong>
-                  <br />
-                  Vehicle: {driver.vehicle?.type}
-                  <br />
-                  Rating: {driver.rating?.toFixed(2)}
-                  <br />
-                  Available: {String(live.isAvailable)}
-                </Popup>
-              </Marker>
-            );
-          })}
-        </MapContainer>
-
-        <aside className="control-card">
-          <div className="brand-row">
+      <section className="ride-app">
+        <header className="app-nav">
+          <div className="brand-lockup">
             <div className="brand-mark">S</div>
             <div>
-              <p className="eyebrow">Sirat By Farhan Live Dispatch</p>
-              <h1>Ride Control Tower</h1>
+              <p>Sirat</p>
+              <strong>Dispatch</strong>
             </div>
           </div>
 
-          <p className="lede">
-            Watch live Navi Mumbai supply, create a ride, and push the driver
-            response flow without opening Postman.
-          </p>
+          <nav className="nav-tabs" aria-label="Sirat sections">
+            <button className="active" type="button">Ride</button>
+            <button type="button">Intelligent Match</button>
+            <button type="button">Activity</button>
+          </nav>
 
-          <div className="stats-grid">
-            <div className="stat-card">
-              <span>{drivers.length}</span>
-              <small>available nearby</small>
-            </div>
-
-            <div className="stat-card">
-              <span>{MAP_RING}</span>
-              <small>H3 ring</small>
-            </div>
-
-            <div className="stat-card wide">
-              <span>{lastUpdated || "--"}</span>
-              <small>last refresh</small>
-            </div>
+          <div className={`ride-status-chip ${heroTone}`}>
+            <span />
+            {heroStatus}
           </div>
+        </header>
 
-          <section className="dispatch-box">
-            <div className="section-heading">
-              <span>Ride Request</span>
-              <strong>{getRideLabel(currentRide)}</strong>
-            </div>
-
-            {secondsUntilTimeout !== null && (
-              <div className="timeout-pill">
-                <span>Driver response timeout</span>
-                <strong>{secondsUntilTimeout}s</strong>
-              </div>
-            )}
-
-            <div className="mode-toggle">
-              <button
-                className={matchingMode === "standard" ? "active" : ""}
-                onClick={() => setMatchingMode("standard")}
-                type="button"
-              >
-                Standard
-              </button>
-              <button
-                className={matchingMode === "semantic" ? "active" : ""}
-                onClick={() => setMatchingMode("semantic")}
-                type="button"
-              >
-                Semantic
-              </button>
-            </div>
-
-            <div className="route-card">
-              <div>
-                <span>Pickup</span>
-                <strong>{pickup.lat}, {pickup.lng}</strong>
-              </div>
-              <div>
-                <span>Dropoff</span>
-                <strong>{dropoff.lat}, {dropoff.lng}</strong>
-              </div>
-            </div>
-
-            <button
-              className="primary-action"
-              disabled={actionState !== "idle"}
-              onClick={createRide}
-              type="button"
-            >
-              {actionState === "creating" ? "Creating ride..." : "Create Test Ride"}
-            </button>
-          </section>
-
-          <section className="driver-box">
-            <div className="section-heading">
-              <span>Assigned Driver</span>
-              <strong>{assignedDriver?.name || "None"}</strong>
-            </div>
-
-            {assignedDriver ? (
-              <div className="driver-card">
-                <div>
-                  <span>Vehicle</span>
-                  <strong>
-                    {assignedDriver.vehicle?.type || "unknown"} /{" "}
-                    {assignedDriver.vehicle?.plateNumber || "no plate"}
-                  </strong>
-                </div>
-                <div>
-                  <span>Rating</span>
-                  <strong>{assignedDriver.rating?.toFixed(2) || "--"}</strong>
-                </div>
-                <div>
-                  <span>Status</span>
-                  <strong>{currentRide?.status || "--"}</strong>
-                </div>
-              </div>
-            ) : (
-              <p className="empty-state">
-                Create a ride and Sirat will assign the best available driver.
+        <div className={`booking-layout ${showRideChoices ? "rides-phase" : "route-phase"}`}>
+          <aside className="booking-panel">
+            <section className="request-card">
+              <p className="eyebrow">Get a ride</p>
+              <h1>{showRideChoices ? "Choose your Sirat ride" : "Plan your route"}</h1>
+              <p className="lede">
+                {showRideChoices
+                  ? "Pick a ride type and request a driver from the live dispatch pool."
+                  : "Choose a matching style, confirm the route, then browse available rides."}
               </p>
+
+              <div className="route-stack" aria-label="Route">
+                <div className="route-line">
+                  <span className="route-dot pickup-dot" />
+                  <div>
+                    <small>From</small>
+                    <strong>Vashi Plaza</strong>
+                    <p>{pickup.lat}, {pickup.lng}</p>
+                  </div>
+                </div>
+
+                <div className="route-line">
+                  <span className="route-dot dropoff-dot" />
+                  <div>
+                    <small>To</small>
+                    <strong>Palm Beach Road</strong>
+                    <p>{dropoff.lat}, {dropoff.lng}</p>
+                  </div>
+                </div>
+
+                <div className="route-line muted-line">
+                  <span className="route-dot time-dot" />
+                  <div>
+                    <small>When</small>
+                    <select aria-label="Pickup time" defaultValue="now">
+                      <option value="now">Pickup now</option>
+                      <option value="10">In 10 minutes</option>
+                      <option value="20">In 20 minutes</option>
+                    </select>
+                    <p>Live dispatch, no scheduling delay</p>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="ride-mode-card">
+              <div className="section-heading">
+                <span>Matching style</span>
+                <strong>{drivers.length} drivers nearby</strong>
+              </div>
+
+              <div className="mode-toggle">
+                <button
+                  className={matchingMode === "standard" ? "active" : ""}
+                  onClick={() => setMatchingMode("standard")}
+                  type="button"
+                >
+                  <span>Standard</span>
+                  <small>Nearest available driver</small>
+                </button>
+                <button
+                  className={matchingMode === "semantic" ? "active" : ""}
+                  onClick={() => setMatchingMode("semantic")}
+                  type="button"
+                >
+                  <span>Intelligent</span>
+                  <small>Match by natural language</small>
+                </button>
+              </div>
+
+              {matchingMode === "semantic" && (
+                <label className="ai-query-box">
+                  <span>Describe your ideal driver</span>
+                  <textarea
+                    value={semanticQuery}
+                    onChange={(event) => setSemanticQuery(event.target.value)}
+                    rows={3}
+                    placeholder="Pet friendly, Hindi speaking, airport friendly..."
+                  />
+                </label>
+              )}
+            </section>
+
+            {!showRideChoices && (
+              <button
+                className="primary-action look-rides-action"
+                onClick={() => setBookingPhase("rides")}
+                type="button"
+              >
+                Look for rides
+              </button>
             )}
 
-            <div className="response-actions">
+            {showRideChoices && (
               <button
-                disabled={!canRespond || actionState !== "idle"}
-                onClick={acceptRide}
+                className="secondary-action"
+                onClick={() => setBookingPhase("route")}
                 type="button"
               >
-                Accept
+                Edit route
               </button>
+            )}
+          </aside>
+
+          {showRideChoices && (
+          <section className="ride-results">
+            <section className="available-rides results-rides">
+              <div className="section-heading">
+                <span>Available rides</span>
+                <strong>{selectedOption?.label}</strong>
+              </div>
+
+              <div className="ride-option-list">
+                {rideOptions.map((option) => (
+                  <button
+                    className={selectedRideOption === option.id ? "selected" : ""}
+                    key={option.id}
+                    onClick={() => setSelectedRideOption(option.id)}
+                    type="button"
+                  >
+                    <div className="vehicle-icon">{option.icon}</div>
+                    <div>
+                      <strong>{option.label}</strong>
+                      <p>{option.description}</p>
+                      <small>{option.eta} away</small>
+                    </div>
+                    <span>{option.price}</span>
+                  </button>
+                ))}
+              </div>
               <button
-                disabled={!canRespond || actionState !== "idle"}
-                onClick={rejectRide}
+                className="primary-action"
+                disabled={actionState !== "idle"}
+                onClick={createRide}
                 type="button"
               >
-                Reject
+                {actionState === "creating"
+                  ? "Requesting..."
+                  : `Request ${selectedOption?.label}`}
               </button>
-              <button
-                disabled={!canComplete || actionState !== "idle"}
-                onClick={completeRide}
-                type="button"
-              >
-                Complete
-              </button>
-              <button
-                disabled={!canCancel || actionState !== "idle"}
-                onClick={cancelRide}
-                type="button"
-              >
-                Cancel
-              </button>
+            </section>
+
+            <section className={`trip-card ${heroTone}`}>
+              <div className="section-heading">
+                <span>Trip status</span>
+                <strong>{currentRide?.status || "ready"}</strong>
+              </div>
+
+              {secondsUntilTimeout !== null && (
+                <div className="timeout-pill">
+                  <span>Offer expires in</span>
+                  <strong>{secondsUntilTimeout}s</strong>
+                </div>
+              )}
+
+              {assignedDriver ? (
+                <div className="assigned-driver-card">
+                  <div className="driver-avatar">
+                    {assignedDriver.name?.charAt(0) || "D"}
+                  </div>
+                  <div>
+                    <small>Your {assignedVehicle}</small>
+                    <strong>{assignedDriver.name}</strong>
+                    <p>
+                      {assignedDriver.vehicle?.plateNumber || "Plate pending"} ·{" "}
+                      {assignedDriver.rating?.toFixed(2) || "--"} rating
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <p className="empty-state">
+                  Request a ride and we will show the assigned driver here.
+                </p>
+              )}
+
+            </section>
+          </section>
+          )}
+
+          <section className="map-card">
+            <MapContainer
+              center={[pickup.lat, pickup.lng]}
+              zoom={13}
+              scrollWheelZoom
+              className="map"
+            >
+              <TileLayer
+                attribution="&copy; OpenStreetMap contributors"
+                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              />
+
+              <Marker position={[pickup.lat, pickup.lng]} icon={pickupIcon}>
+                <Popup>Pickup point</Popup>
+              </Marker>
+
+              <Marker position={[dropoff.lat, dropoff.lng]} icon={dropoffIcon}>
+                <Popup>Dropoff point</Popup>
+              </Marker>
+
+              {drivers.map((driver) => {
+                const live = driver.liveLocation;
+
+                if (!live) {
+                  return null;
+                }
+
+                return (
+                  <Marker
+                    key={driver._id}
+                    position={[live.lat, live.lng]}
+                    icon={driverIcon}
+                  >
+                    <Popup>
+                      <strong>{driver.name}</strong>
+                      <br />
+                      Vehicle: {driver.vehicle?.type}
+                      <br />
+                      Rating: {driver.rating?.toFixed(2)}
+                      <br />
+                      Available: {String(live.isAvailable)}
+                    </Popup>
+                  </Marker>
+                );
+              })}
+            </MapContainer>
+
+            <div className="map-floating-card">
+              <strong>From Vashi Plaza</strong>
+              <span>{selectedOption?.eta} pickup estimate</span>
             </div>
           </section>
 
-          <p className="notice">{notice}</p>
-        </aside>
+          <div className="notice-row">
+            <span>{lastUpdated || "--"}</span>
+            <p>{notice}</p>
+          </div>
+        </div>
       </section>
     </main>
   );

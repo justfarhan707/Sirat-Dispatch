@@ -444,6 +444,15 @@ export const getRideById = async (rideId: string) => {
     return Ride.findById(rideId).populate("assignedDriver")
 };
 
+export const getActiveRideForDriver = async (driverId: string) => {
+    return Ride.findOne({
+        assignedDriver: driverId,
+        status: { $in: ["assigned", "ongoing"] },
+    })
+        .sort({ updatedAt: -1 })
+        .populate("assignedDriver");
+};
+
 
 //helper
 const releaseDriverFromRide = async (driverId: string) => {

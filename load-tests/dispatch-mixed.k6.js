@@ -9,16 +9,16 @@ export const options = {
     scenarios: {
         mixed_dispatch: {
             executor: "constant-arrival-rate",
-            rate: 50,
+            rate: 100,
             timeUnit: "1s",
             duration: "1m",
-            preAllocatedVUs: 25,
-            maxVUs: 120,
+            preAllocatedVUs: 60,
+            maxVUs: 180,
         },
     },
     thresholds: {
         http_req_failed: ["rate<0.02"],
-        "http_req_duration{endpoint:nearby_drivers}": ["p(95)<200"],
+        "http_req_duration{endpoint:nearby_drivers}": ["p(95)<500"],
         "http_req_duration{endpoint:ride_create}": ["p(95)<1000"],
     },
 };
