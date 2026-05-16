@@ -133,6 +133,21 @@ export const updateLiveDriverAvailability = async (driverId: string, isAvailable
     await locationRedis.set(
         liveDriverKey,
         JSON.stringify(updatedLiveDriver)
-    )
+    );
+
+    await redisPub.publish(
+        DRIVER_LOCATION_UPDATED_CHANNEL,
+        JSON.stringify({
+            driverId,
+            location: {
+                type: "Point",
+                coordinates: [updatedLiveDriver.lng, updatedLiveDriver.lat],
+            },
+            h3Index: updatedLiveDriver.h3Index,
+            isAvailable: updatedLiveDriver.isAvailable,
+            lastSeen: updatedLiveDriver.updatedAt,
+        })
+    );
+
     return updatedLiveDriver;
 }

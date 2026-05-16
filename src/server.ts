@@ -6,7 +6,7 @@ import { connectDb } from "./config/db";
 import { initSocket } from "./socket";
 import { subscribeToDriverLocationUpdates } from "./pubsub/driverLocation.pubsub";
 import { attachSocketRedisAdapter } from "./config/socketAdapter";
-
+import { subscribeToDispatchEvents } from "./pubsub/dispatchEvent.pubsub";
 
 dotenv.config();
 
@@ -23,6 +23,14 @@ const io = new Server(httpServer, {
 const startServer = async () => {
   await attachSocketRedisAdapter(io);
   initSocket(io);
+
+  if (process.env.ENABLE_DISPATCH_EVENT_SUBSCRIBER === "false") {
+    console.log("Dispatch event Redis subscriber disabled for this Core API instance");
+  } else {
+    subscribeToDispatchEvents().catch((err) => {
+      console.error("Failed to subscribe to dispatch events:", err);
+    });
+  }
 
   await connectDb();
 

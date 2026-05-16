@@ -35,6 +35,14 @@ export const initSocket = (socketServer: Server) => {
         socket.on("disconnect", () => {
             console.log(`socket disconnected ${socket.id}`);
         });
+
+        socket.on("subscribe:ride", (rideId: string) => {
+            socket.join(`ride:${rideId}`);
+        });
+
+        socket.on("unsubscribe:ride", (rideId: string) => {
+            socket.leave(`ride:${rideId}`);
+        });
     });
 };
 

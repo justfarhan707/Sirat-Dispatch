@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import dns from "dns";
 import Driver from "../models/driver.model";
+import Ride from "../models/ride.model";
 
 dotenv.config();
 
@@ -20,6 +21,9 @@ const LOCATION_SERVICE_URL =
 
 const SIMULATOR_INTERVAL_MS = 3000;
 const MAX_DRIVERS = 100;
+const RANDOM_STEP_SIZE = 0.002;
+const TARGET_STEP_SIZE = 0.0014;
+const TARGET_REACHED_DISTANCE = 0.00025;
 
 // Navi Mumbai-ish movement bounds.
 const BOUNDS = {
@@ -34,14 +38,57 @@ const clamp = (value: number, min: number, max: number) => {
     return Math.max(min, Math.min(max, value));
 };
 
+const getDistance = (
+    from: { lat: number; lng: number },
+    to: { lat: number; lng: number }
+) => {
+    const latDistance = to.lat - from.lat;
+    const lngDistance = to.lng - from.lng;
+
+    return Math.sqrt(latDistance ** 2 + lngDistance ** 2);
+};
+
 const moveDriver = (driver: SimulatedDriver): SimulatedDriver => {
-    const latStep = (Math.random() - 0.5) * 0.002;
-    const lngStep = (Math.random() - 0.5) * 0.002;
+    const latStep = (Math.random() - 0.5) * RANDOM_STEP_SIZE;
+    const lngStep = (Math.random() - 0.5) * RANDOM_STEP_SIZE;
 
     return {
         ...driver,
         lat: clamp(driver.lat + latStep, BOUNDS.minLat, BOUNDS.maxLat),
         lng: clamp(driver.lng + lngStep, BOUNDS.minLng, BOUNDS.maxLng),
+    };
+};
+
+const moveDriverTowardTarget = (
+    driver: SimulatedDriver,
+    target: { lat: number; lng: number }
+): SimulatedDriver => {
+    const distance = getDistance(driver, target);
+
+    if (distance <= TARGET_REACHED_DISTANCE) {
+        return {
+            ...driver,
+            lat: target.lat,
+            lng: target.lng,
+        };
+    }
+
+    const progress = Math.min(TARGET_STEP_SIZE / distance, 1);
+    const latJitter = (Math.random() - 0.5) * 0.00018;
+    const lngJitter = (Math.random() - 0.5) * 0.00018;
+
+    return {
+        ...driver,
+        lat: clamp(
+            driver.lat + (target.lat - driver.lat) * progress + latJitter,
+            BOUNDS.minLat,
+            BOUNDS.maxLat
+        ),
+        lng: clamp(
+            driver.lng + (target.lng - driver.lng) * progress + lngJitter,
+            BOUNDS.minLng,
+            BOUNDS.maxLng
+        ),
     };
 };
 
@@ -69,12 +116,7 @@ const updateLocationService = async (driver: SimulatedDriver) => {
 };
 
 const loadDriversFromMongo = async (): Promise<SimulatedDriver[]> => {
-    const drivers = await Driver.find({
-        isAvailable: true,
-        availabilityStatus: "available",
-        currentRide: null,
-    })
-
+    const drivers = await Driver.find({})
         .limit(MAX_DRIVERS)
         .lean();
 
@@ -88,6 +130,33 @@ const loadDriversFromMongo = async (): Promise<SimulatedDriver[]> => {
             isAvailable: driver.isAvailable,
         };
     });
+};
+
+const getActiveRideTargetsByDriverId = async () => {
+    const activeRides = await Ride.find({
+        status: { $in: ["assigned", "ongoing"] },
+        assignedDriver: { $ne: null },
+    })
+        .select("assignedDriver status pickup dropoff")
+        .lean();
+
+    const targetsByDriverId = new Map<string, { lat: number; lng: number }>();
+
+    activeRides.forEach((ride: any) => {
+        const driverId = String(ride.assignedDriver);
+        const target = ride.status === "ongoing" ? ride.dropoff : ride.pickup;
+
+        if (!target) {
+            return;
+        }
+
+        targetsByDriverId.set(driverId, {
+            lat: target.lat,
+            lng: target.lng,
+        });
+    });
+
+    return targetsByDriverId;
 };
 
 const startSimulator = async () => {
@@ -115,7 +184,17 @@ const startSimulator = async () => {
 
     setInterval(async () => {
         try {
-            drivers = drivers.map(moveDriver);
+            const activeRideTargetsByDriverId = await getActiveRideTargetsByDriverId();
+
+            drivers = drivers.map((driver) => {
+                const target = activeRideTargetsByDriverId.get(driver.driverId);
+
+                if (target) {
+                    return moveDriverTowardTarget(driver, target);
+                }
+
+                return moveDriver(driver);
+            });
 
             await Promise.all(drivers.map(updateLocationService));
 

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MapContainer, Marker, Popup, TileLayer } from "react-leaflet";
+import { MapContainer, Marker, Polyline, Popup, TileLayer } from "react-leaflet";
 import { io } from "socket.io-client";
 import L from "leaflet";
 import "./App.css";
@@ -163,11 +163,102 @@ function getAssignedDriverFromRide(ride) {
   return ride.assignedDriver;
 }
 
+function getDriverMapPosition(driver) {
+  if (driver?.liveLocation?.lat && driver?.liveLocation?.lng) {
+    return [driver.liveLocation.lat, driver.liveLocation.lng];
+  }
+
+  const coordinates = driver?.location?.coordinates;
+
+  if (Array.isArray(coordinates) && coordinates.length >= 2) {
+    const [lng, lat] = coordinates;
+    return [lat, lng];
+  }
+
+  return null;
+}
+
+function getDispatchEventTitle(eventName) {
+  const eventTitles = {
+    ride_created: "Ride created",
+    semantic_match_failed: "Semantic match failed",
+    no_candidates_found: "No candidates found",
+    driver_claim_failed: "Driver claim failed",
+    driver_claimed: "Driver claimed",
+    ride_assigned: "Ride assigned",
+    ride_accepted: "Ride accepted",
+    driver_timed_out: "Driver timed out",
+    driver_rejected: "Driver rejected",
+    ride_no_driver_found: "No driver found",
+    ride_reassigned: "Ride reassigned",
+    ride_back_to_searching: "Ride back to searching",
+    ride_completed: "Ride completed",
+    ride_cancelled: "Ride cancelled",
+  };
+
+  return eventTitles[eventName] || eventName;
+}
+
+function getDispatchEventTone(eventName) {
+  if (
+    [
+      "semantic_match_failed",
+      "no_candidates_found",
+      "driver_claim_failed",
+      "driver_timed_out",
+      "driver_rejected",
+      "ride_no_driver_found",
+      "ride_cancelled",
+    ].includes(eventName)
+  ) {
+    return "warn";
+  }
+
+  if (
+    [
+      "driver_claimed",
+      "ride_assigned",
+      "ride_accepted",
+      "ride_reassigned",
+      "ride_completed",
+    ].includes(eventName)
+  ) {
+    return "good";
+  }
+
+  return "active";
+}
+
+function getDispatchEventSummary(event) {
+  if (event.reason) {
+    return `Reason: ${event.reason}`;
+  }
+
+  if (event.driverId) {
+    return `Driver ${String(event.driverId).slice(-6)}`;
+  }
+
+  if (event.matchingMode) {
+    return `${event.matchingMode} matching`;
+  }
+
+  return "Dispatch lifecycle event";
+}
+
+function formatEventTime(timestamp) {
+  if (!timestamp) {
+    return "--";
+  }
+
+  return new Date(timestamp).toLocaleTimeString();
+}
+
 function App() {
   const appView =
     new URLSearchParams(window.location.search).get("view") === "driver"
       ? "driver"
       : "rider";
+  const [activeTab, setActiveTab] = useState("ride");
   const [drivers, setDrivers] = useState([]);
   const [driverDirectory, setDriverDirectory] = useState([]);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -182,8 +273,12 @@ function App() {
   const [notice, setNotice] = useState("Choose a ride style and request a driver.");
   const [now, setNow] = useState(Date.now());
   const [areaH3Indexes, setAreaH3Indexes] = useState([]);
+  const [dispatchEvents, setDispatchEvents] = useState([]);
+  const [driverRouteToPickup, setDriverRouteToPickup] = useState([]);
+  const [animatedDriverPosition, setAnimatedDriverPosition] = useState(null);
   const driversRef = useRef([]);
   const subscribedH3Ref = useRef(new Set());
+  const driverRouteKeyRef = useRef(null);
 
 
   const fetchAreaH3Indexes = async () => {
@@ -397,6 +492,29 @@ function App() {
     socket.on("driver:locationUpdated", (payload) => {
       console.log("Live socket driver update:", payload.driverId, payload.h3Index);
 
+      const [lng, lat] = payload.location.coordinates;
+
+      setAssignedDriver((currentAssignedDriver) => {
+        if (
+          !currentAssignedDriver ||
+          String(currentAssignedDriver._id) !== String(payload.driverId)
+        ) {
+          return currentAssignedDriver;
+        }
+
+        return {
+          ...currentAssignedDriver,
+          liveLocation: {
+            driverId: payload.driverId,
+            lat,
+            lng,
+            h3Index: payload.h3Index,
+            isAvailable: payload.isAvailable,
+            updatedAt: payload.lastSeen,
+          },
+        };
+      });
+
       const driverExists = driversRef.current.some(
         (driver) => String(driver._id) === String(payload.driverId)
       );
@@ -405,8 +523,6 @@ function App() {
         fetchDrivers();
         return;
       }
-
-      const [lng, lat] = payload.location.coordinates;
 
       setDrivers((currentDrivers) => {
         const nextDrivers = currentDrivers.map((driver) => {
@@ -433,10 +549,29 @@ function App() {
 
     });
 
+    socket.on("dispatch:event", (payload) => {
+      setDispatchEvents((currentEvents) => {
+        const eventKey = `${payload.timestamp}-${payload.event}-${payload.rideId || ""}-${payload.driverId || ""}`;
+
+        if (currentEvents.some((event) => event.eventKey === eventKey)) {
+          return currentEvents;
+        }
+
+        return [
+          {
+            ...payload,
+            eventKey,
+          },
+          ...currentEvents,
+        ].slice(0, 40);
+      });
+    });
+
     return () => {
       socket.off("connect");
       socket.off("disconnect");
       socket.off("driver:locationUpdated");
+      socket.off("dispatch:event");
       socket.disconnect();
     };
   }, []);
@@ -467,6 +602,22 @@ function App() {
 
     return () => clearInterval(intervalId);
   }, [currentRide?._id, currentRide?.status]);
+
+  useEffect(() => {
+    const hasAssignedTripFocus =
+      Boolean(assignedDriver) && ["assigned", "ongoing"].includes(currentRide?.status);
+
+    if (!hasAssignedTripFocus || !assignedDriver?._id) {
+      return;
+    }
+
+    const driverId = String(assignedDriver._id);
+    socket.emit("subscribe:driver", driverId);
+
+    return () => {
+      socket.emit("unsubscribe:driver", driverId);
+    };
+  }, [currentRide?.status, assignedDriver?._id]);
 
   useEffect(() => {
     if (selectedDriverId || driverDirectory.length === 0) {
@@ -702,6 +853,125 @@ function App() {
   const heroTone = getRideTone(currentRide);
   const selectedOption = rideOptions.find((option) => option.id === selectedRideOption);
   const showRideChoices = bookingPhase === "rides";
+  const showAssignedTripFocus =
+    Boolean(assignedDriver) && ["assigned", "ongoing"].includes(currentRide?.status);
+  const assignedDriverPosition = getDriverMapPosition(assignedDriver);
+  const pickupPosition = [pickup.lat, pickup.lng];
+  const dropoffPosition = [dropoff.lat, dropoff.lng];
+  const activeTripTarget = currentRide?.status === "ongoing" ? dropoff : pickup;
+  const activeTripTargetPosition = [activeTripTarget.lat, activeTripTarget.lng];
+  const activeTripStartPosition =
+    currentRide?.status === "ongoing" ? pickupPosition : assignedDriverPosition;
+  const assignedDriverMapPosition =
+    animatedDriverPosition ||
+    (currentRide?.status === "ongoing" ? pickupPosition : assignedDriverPosition);
+  const visibleMapDrivers = showAssignedTripFocus ? [] : drivers;
+
+  useEffect(() => {
+    if (!showAssignedTripFocus || !activeTripStartPosition) {
+      setDriverRouteToPickup([]);
+      setAnimatedDriverPosition(null);
+      driverRouteKeyRef.current = null;
+      return;
+    }
+
+    const routeKey = [
+      assignedDriver?._id,
+      currentRide?.status,
+      activeTripTarget.lat,
+      activeTripTarget.lng,
+    ].join(":");
+
+    if (driverRouteKeyRef.current === routeKey) {
+      return;
+    }
+
+    driverRouteKeyRef.current = routeKey;
+
+    const [startLat, startLng] = activeTripStartPosition;
+    const controller = new AbortController();
+
+    const fetchDriverRoute = async () => {
+      try {
+        const routeUrl = new URL(
+          `https://router.project-osrm.org/route/v1/driving/${startLng},${startLat};${activeTripTarget.lng},${activeTripTarget.lat}`
+        );
+
+        routeUrl.searchParams.set("overview", "full");
+        routeUrl.searchParams.set("geometries", "geojson");
+
+        const res = await fetch(routeUrl, {
+          signal: controller.signal,
+        });
+
+        if (!res.ok) {
+          throw new Error("OSRM route request failed");
+        }
+
+        const data = await res.json();
+        const coordinates = data.routes?.[0]?.geometry?.coordinates || [];
+
+        if (!coordinates.length) {
+          throw new Error("OSRM route returned no coordinates");
+        }
+
+        setDriverRouteToPickup(
+          coordinates.map(([lng, lat]) => [lat, lng])
+        );
+        setAnimatedDriverPosition(coordinates[0] ? [coordinates[0][1], coordinates[0][0]] : null);
+      } catch (error) {
+        if (error.name === "AbortError") {
+          return;
+        }
+
+        console.error("Failed to fetch driver route:", error);
+        setDriverRouteToPickup([activeTripStartPosition, activeTripTargetPosition]);
+        setAnimatedDriverPosition(activeTripStartPosition);
+      }
+    };
+
+    fetchDriverRoute();
+
+    return () => {
+      controller.abort();
+    };
+  }, [
+    showAssignedTripFocus,
+    assignedDriver?._id,
+    currentRide?.status,
+    activeTripTarget.lat,
+    activeTripTarget.lng,
+  ]);
+
+  useEffect(() => {
+    if (!showAssignedTripFocus || driverRouteToPickup.length < 2) {
+      setAnimatedDriverPosition(null);
+      return;
+    }
+
+    let cursor = 0;
+    const routeStep = Math.max(1, Math.floor(driverRouteToPickup.length / 60));
+
+    setAnimatedDriverPosition(driverRouteToPickup[0]);
+
+    const intervalId = setInterval(() => {
+      cursor = Math.min(cursor + routeStep, driverRouteToPickup.length - 1);
+      setAnimatedDriverPosition(driverRouteToPickup[cursor]);
+
+      if (cursor >= driverRouteToPickup.length - 1) {
+        clearInterval(intervalId);
+      }
+    }, 700);
+
+    return () => clearInterval(intervalId);
+  }, [
+    showAssignedTripFocus,
+    assignedDriver?._id,
+    currentRide?.status,
+    activeTripTarget.lat,
+    activeTripTarget.lng,
+    driverRouteToPickup,
+  ]);
 
   if (appView === "driver") {
     const selectedDriver = driverDirectory.find(
@@ -860,9 +1130,31 @@ function App() {
           </div>
 
           <nav className="nav-tabs" aria-label="Sirat sections">
-            <button className="active" type="button">Ride</button>
-            <button type="button">Intelligent Match</button>
-            <button type="button">Activity</button>
+            <button
+              className={activeTab === "ride" ? "active" : ""}
+              onClick={() => setActiveTab("ride")}
+              type="button"
+            >
+              Ride
+            </button>
+            <button
+              className={matchingMode === "semantic" && activeTab === "ride" ? "active" : ""}
+              onClick={() => {
+                setActiveTab("ride");
+                setMatchingMode("semantic");
+                setBookingPhase("route");
+              }}
+              type="button"
+            >
+              Intelligent Match
+            </button>
+            <button
+              className={activeTab === "activity" ? "active" : ""}
+              onClick={() => setActiveTab("activity")}
+              type="button"
+            >
+              Activity
+            </button>
           </nav>
 
           <div className={`ride-status-chip ${heroTone}`}>
@@ -871,6 +1163,77 @@ function App() {
           </div>
         </header>
 
+        {activeTab === "activity" ? (
+          <div className="activity-layout">
+            <section className="activity-hero">
+              <p className="eyebrow">Live dispatch stream</p>
+              <h1>Activity timeline</h1>
+              <p className="lede">
+                Watch ride creation, driver claims, semantic misses, assignments, accepts,
+                and completions arrive from the backend socket stream.
+              </p>
+
+              <div className="activity-metrics">
+                <div>
+                  <span>Total events</span>
+                  <strong>{dispatchEvents.length}</strong>
+                </div>
+                <div>
+                  <span>Latest event</span>
+                  <strong>
+                    {dispatchEvents[0]
+                      ? getDispatchEventTitle(dispatchEvents[0].event)
+                      : "Waiting"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Socket</span>
+                  <strong>{socket.connected ? "connected" : "connecting"}</strong>
+                </div>
+              </div>
+            </section>
+
+            <section className="activity-panel">
+              <div className="section-heading">
+                <span>Dispatch events</span>
+                <strong>{dispatchEvents.length ? "live" : "waiting"}</strong>
+              </div>
+
+              {dispatchEvents.length === 0 ? (
+                <div className="activity-empty">
+                  <span />
+                  <strong>No dispatch events yet</strong>
+                  <p>Request a ride, reject one, or complete a trip to light up this timeline.</p>
+                </div>
+              ) : (
+                <div className="activity-list">
+                  {dispatchEvents.map((event) => (
+                    <article
+                      className={`activity-item ${getDispatchEventTone(event.event)}`}
+                      key={event.eventKey}
+                    >
+                      <div className="activity-dot" />
+                      <div>
+                        <small>{formatEventTime(event.timestamp)}</small>
+                        <strong>{getDispatchEventTitle(event.event)}</strong>
+                        <p>{getDispatchEventSummary(event)}</p>
+
+                        <div className="activity-tags">
+                          {event.rideId && <span>ride {String(event.rideId).slice(-6)}</span>}
+                          {event.driverId && <span>driver {String(event.driverId).slice(-6)}</span>}
+                          {event.assignmentVersion && <span>v{event.assignmentVersion}</span>}
+                          {event.eligibleDriverCount !== undefined && (
+                            <span>{event.eligibleDriverCount} eligible</span>
+                          )}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+        ) : (
         <div className={`booking-layout ${showRideChoices ? "rides-phase" : "route-phase"}`}>
           <aside className="booking-panel">
             <section className="request-card">
@@ -1070,15 +1433,62 @@ function App() {
                 url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
               />
 
-              <Marker position={[pickup.lat, pickup.lng]} icon={pickupIcon}>
+              {showAssignedTripFocus && assignedDriverMapPosition && (
+                <Polyline
+                  positions={
+                    driverRouteToPickup.length > 0
+                      ? driverRouteToPickup
+                      : [activeTripStartPosition || assignedDriverMapPosition, activeTripTargetPosition]
+                  }
+                  pathOptions={{
+                    color: "#0c6b46",
+                    weight: 6,
+                    opacity: 0.9,
+                  }}
+                />
+              )}
+
+              {showAssignedTripFocus && (
+                <Polyline
+                  positions={[pickupPosition, dropoffPosition]}
+                  pathOptions={{
+                    color: "#1f76ff",
+                    weight: 4,
+                    opacity: 0.45,
+                    dashArray: "8 10",
+                  }}
+                />
+              )}
+
+              <Marker position={pickupPosition} icon={pickupIcon}>
                 <Popup>Pickup point</Popup>
               </Marker>
 
-              <Marker position={[dropoff.lat, dropoff.lng]} icon={dropoffIcon}>
+              <Marker position={dropoffPosition} icon={dropoffIcon}>
                 <Popup>Dropoff point</Popup>
               </Marker>
 
-              {drivers.map((driver) => {
+              {showAssignedTripFocus && assignedDriverMapPosition && (
+                <Marker
+                  key={`assigned-${assignedDriver._id}`}
+                  position={assignedDriverMapPosition}
+                  icon={driverIcon}
+                >
+                  <Popup>
+                    <strong>{assignedDriver.name}</strong>
+                    <br />
+                    {currentRide?.status === "ongoing"
+                      ? "Heading to destination"
+                      : "On the way to pickup"}
+                    <br />
+                    Vehicle: {assignedDriver.vehicle?.type}
+                    <br />
+                    Rating: {assignedDriver.rating?.toFixed(2)}
+                  </Popup>
+                </Marker>
+              )}
+
+              {visibleMapDrivers.map((driver) => {
                 const live = driver.liveLocation;
 
                 if (!live) {
@@ -1105,9 +1515,17 @@ function App() {
               })}
             </MapContainer>
 
-            <div className="map-floating-card">
-              <strong>From Vashi Plaza</strong>
-              <span>{selectedOption?.eta} pickup estimate</span>
+            <div className={`map-floating-card ${showAssignedTripFocus ? "assigned" : ""}`}>
+              <strong>
+                {showAssignedTripFocus && assignedDriver
+                  ? `${assignedDriver.name} is on the way`
+                  : "From Vashi Plaza"}
+              </strong>
+              <span>
+                {showAssignedTripFocus
+                  ? "Driver en route to pickup"
+                  : `${selectedOption?.eta} pickup estimate`}
+              </span>
             </div>
           </section>
 
@@ -1116,6 +1534,7 @@ function App() {
             <p>{notice}</p>
           </div>
         </div>
+        )}
       </section>
     </main>
   );
