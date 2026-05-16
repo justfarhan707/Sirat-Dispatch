@@ -266,69 +266,117 @@ type RankedDriver = {
 };
 
 
-export const rankDriversByIntent = async (drivers: any[], query: string) => {
-    const driverIdsMissingEmbeddings = drivers
-        .filter((driver: any) => !Array.isArray(driver.embedding))
-        .map((driver: any) => String(driver._id));
 
-    if (driverIdsMissingEmbeddings.length > 0) {
-        const embeddingDrivers = await Driver.find({
-            _id: { $in: driverIdsMissingEmbeddings },
-            embeddingStatus: "completed",
-        })
-            .select("_id embedding embeddingStatus")
-            .lean();
 
-        const embeddingByDriverId = new Map(
-            embeddingDrivers.map((driver: any) => [String(driver._id), driver])
-        );
+const SEMANTIC_MATCH_THRESHOLD = Number(process.env.SEMANTIC_MATCH_THRESHOLD || 0.6);
 
-        drivers = drivers.map((driver: any) => {
-            const embeddingDriver = embeddingByDriverId.get(String(driver._id));
+export type SemanticMatchReason =
+    | "matched"
+    | "no_nearby_drivers"
+    | "no_driver_embeddings"
+    | "below_similarity_threshold"
+    | "unsupported_sensitive_attribute";
 
-            if (!embeddingDriver) {
-                return driver;
-            }
+const queryRequestsUnsupportedSensitiveAttribute = (query: string) => {
+    const normalizedQuery = query.toLowerCase();
+    const sensitiveAttributePatterns = [
+        /\bgay\b/,
+        /\blesbian\b/,
+        /\bbisexual\b/,
+        /\btransgender\b/,
+        /\btrans\b/,
+        /\bqueer\b/,
+        /\blgbt\b/,
+        /\blgbtq\b/,
+        /\bmuslim\b/,
+        /\bhindu\b/,
+        /\bchristian\b/,
+        /\bjewish\b/,
+        /\bsikh\b/,
+    ];
 
-            return {
-                ...driver,
-                embedding: embeddingDriver.embedding,
-                embeddingStatus: embeddingDriver.embeddingStatus,
-            };
-        });
+    return sensitiveAttributePatterns.some((pattern) => pattern.test(normalizedQuery));
+};
+
+export async function rankDriversByIntentWithMetadata(drivers: any[], query: string) {
+    if (queryRequestsUnsupportedSensitiveAttribute(query)) {
+        return {
+            drivers: [],
+            reason: "unsupported_sensitive_attribute",
+            eligibleDriverCount: 0,
+        };
     }
 
-    const eligibleDrivers = drivers.filter(
-        (driver: any) =>
-            Array.isArray(driver.embedding) &&
-            driver.embedding.length > 0 &&
-            driver.embeddingStatus === "completed"
+    if (!drivers.length) {
+        return { drivers: [], reason: "no_nearby_drivers", eligibleDriverCount: 0 };
+    }
+
+    const driverIds = drivers.map((driver) => driver._id);
+    const driversWithEmbeddings = await Driver.find({
+        _id: { $in: driverIds },
+        embeddingStatus: "completed",
+    })
+        .select("_id embedding embeddingStatus")
+        .lean();
+
+    const embeddingsByDriverId = new Map(
+        driversWithEmbeddings.map((driver: any) => [String(driver._id), driver])
     );
 
-    if (eligibleDrivers.length === 0) {
-        return [];
+    const hydratedDrivers = drivers.map((driver) => {
+        const embeddingData = embeddingsByDriverId.get(String(driver._id));
+
+        return {
+            ...driver,
+            embedding: embeddingData?.embedding,
+            embeddingStatus: embeddingData?.embeddingStatus || driver.embeddingStatus,
+        };
+    });
+
+    const eligibleDrivers = hydratedDrivers.filter((driver) => {
+        return driver.embeddingStatus === "completed"
+            && Array.isArray(driver.embedding)
+            && driver.embedding.length > 0;
+    });
+
+    if (!eligibleDrivers.length) {
+        return { drivers: [], reason: "no_driver_embeddings", eligibleDriverCount: 0 };
     }
 
     const queryEmbedding = await generateQueryEmbedding(query);
 
-    const rankedDrivers: RankedDriver[] = eligibleDrivers.map((driver: any) => {
-        const similarityScore = cosineSimilarity(queryEmbedding, driver.embedding);
-
-
-        return {
+    const rankedDrivers = eligibleDrivers
+        .map((driver) => ({
             ...driver,
-            similarityScore
+            similarityScore: cosineSimilarity(queryEmbedding, driver.embedding),
+        }))
+        .sort((a, b) => b.similarityScore - a.similarityScore);
+
+    const matchedDrivers = rankedDrivers.filter((driver) => {
+        return driver.similarityScore >= SEMANTIC_MATCH_THRESHOLD;
+    });
+
+    if (!matchedDrivers.length) {
+        return {
+            drivers: [],
+            reason: "below_similarity_threshold",
+            eligibleDriverCount: eligibleDrivers.length,
         };
-    })
+    }
 
-        .sort((a: RankedDriver, b: RankedDriver) =>
-            b.similarityScore - a.similarityScore
-        );
-
-    return rankedDrivers;
-
+    return {
+        drivers: matchedDrivers,
+        reason: "matched",
+        eligibleDriverCount: eligibleDrivers.length,
+    };
 }
 
+
+
+export async function rankDriversByIntent(drivers: any[], query: string) {
+    const result = await rankDriversByIntentWithMetadata(drivers, query);
+    return result.drivers;
+}
 
 export const matchDriversByIntent = async (
     lat: number,

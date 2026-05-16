@@ -606,6 +606,20 @@ h2 {
   line-height: 1.5;
 }
 
+.status-message {
+  padding: 12px 14px;
+  margin: 12px 0 0;
+  border-radius: 14px;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.status-message.warning {
+  color: #7a2d13;
+  background: rgba(255, 106, 61, 0.13);
+}
+
 .response-actions {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

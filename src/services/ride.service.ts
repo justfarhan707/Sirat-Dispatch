@@ -2,7 +2,7 @@ import Driver from "../models/driver.model";
 import Ride from "../models/ride.model";
 import {
     findNearbyDriversByRing,
-    rankDriversByIntent,
+    rankDriversByIntentWithMetadata,
 } from "./driver.service";
 import { updateLiveDriverAvailability } from "../clients/location.client";
 import {
@@ -36,8 +36,9 @@ const findCandidateDriversWithSearchWidening = async (
     matchingMode: "standard" | "semantic",
     excludedDriverIds: string[] = []
 ) => {
-
     const ringSizes = [2, 3, 4];
+    let semanticFailureReason: string | null = null;
+    let eligibleDriverCount = 0;
 
     for (const ringSize of ringSizes) {
         const nearbyDrivers = await findNearbyDriversByRing(
@@ -46,22 +47,52 @@ const findCandidateDriversWithSearchWidening = async (
             ringSize
         );
 
-        const candidateDrivers =
-            matchingMode === "semantic"
-                ? await rankDriversByIntent(nearbyDrivers, query)
-                : nearbyDrivers;
+        if (matchingMode === "semantic") {
+            const semanticResult = await rankDriversByIntentWithMetadata(
+                nearbyDrivers,
+                query || ""
+            );
 
-        const filteredCandidates = candidateDrivers.filter(
+            semanticFailureReason = semanticResult.reason;
+            eligibleDriverCount = semanticResult.eligibleDriverCount;
+
+            const filteredCandidates = semanticResult.drivers.filter(
+                (driver: any) => !excludedDriverIds.includes(String(driver._id))
+            );
+
+            if (filteredCandidates.length > 0) {
+                console.log(`Found semantic candidates using ring size ${ringSize}`);
+
+                return {
+                    drivers: filteredCandidates,
+                    semanticFailureReason: null,
+                    eligibleDriverCount,
+                };
+            }
+
+            continue;
+        }
+
+        const filteredCandidates = nearbyDrivers.filter(
             (driver: any) => !excludedDriverIds.includes(String(driver._id))
         );
 
         if (filteredCandidates.length > 0) {
             console.log(`Found candidates using ring size ${ringSize}`);
-            return filteredCandidates;
+
+            return {
+                drivers: filteredCandidates,
+                semanticFailureReason: null,
+                eligibleDriverCount: 0,
+            };
         }
     }
-    return [];
 
+    return {
+        drivers: [],
+        semanticFailureReason,
+        eligibleDriverCount,
+    };
 };
 
 
@@ -121,13 +152,32 @@ export const dispatchRide = async (rideId: string) => {
     }
 
 
-    const candidateDrivers = await findCandidateDriversWithSearchWidening(
+    const candidateSearch = await findCandidateDriversWithSearchWidening(
         ride.pickup,
         ride.query,
         ride.matchingMode
     );
 
+    const candidateDrivers = candidateSearch.drivers;
+
     if (candidateDrivers.length === 0) {
+        if (ride.matchingMode === "semantic") {
+            ride.status = "no_driver_found";
+            ride.dispatchFailureReason = candidateSearch.semanticFailureReason;
+            await ride.save();
+
+            logDispatchEvent("semantic_match_failed", {
+                rideId: String(ride._id),
+                reason: candidateSearch.semanticFailureReason,
+                eligibleDriverCount: candidateSearch.eligibleDriverCount,
+            });
+
+            return {
+                ride,
+                assignedDriver: null,
+            };
+        }
+
         logDispatchEvent("no_candidates_found", {
             rideId: String(ride._id),
             matchingMode: ride.matchingMode,
@@ -184,6 +234,7 @@ export const dispatchRide = async (rideId: string) => {
         ride.lastAssignedAt = now;
         ride.assignmentExpiresAt = assignmentExpiresAt;
         ride.assignmentVersion += 1;
+        ride.dispatchFailureReason = null;
 
         await ride.save();
 
@@ -212,23 +263,22 @@ export const dispatchRide = async (rideId: string) => {
     };
 };
 
-
 export const acceptAssignedRide = async (rideId: string) => {
     const ride = await Ride.findById(rideId);
 
     if (!ride) {
-        return null
+        return null;
     }
 
-    if (ride.status != "assigned") {
+    if (ride.status !== "assigned") {
         return {
-            error: "Only assigned ride can be accpeted",
-        }
+            error: "Only assigned ride can be accepted",
+        };
     }
 
     if (!ride.assignedDriver) {
         return {
-            error: "No driver assigned to ths ride",
+            error: "No driver assigned to this ride",
         };
     }
 
@@ -255,19 +305,15 @@ export const acceptAssignedRide = async (rideId: string) => {
         driverId: String(ride.assignedDriver),
     });
 
-
     return {
         ride,
     };
 };
 
-
-
 export const rejectAssignedRide = async (
     rideId: string,
     attemptStatus: "rejected" | "timed_out" = "rejected"
 ) => {
-
     const ride = await Ride.findById(rideId);
 
     if (!ride) {
@@ -291,7 +337,6 @@ export const rejectAssignedRide = async (
             error: "Ride pickup location is missing",
         };
     }
-
 
     const rejectedDriverId = String(ride.assignedDriver);
     const currentAssignmentVersion = ride.assignmentVersion;
@@ -319,13 +364,11 @@ export const rejectAssignedRide = async (
         );
     }
 
-
     await Driver.findByIdAndUpdate(rejectedDriverId, {
         isAvailable: true,
         availabilityStatus: "available",
         currentRide: null,
     });
-
 
     await updateLiveDriverAvailability(rejectedDriverId, true);
 
@@ -333,6 +376,7 @@ export const rejectAssignedRide = async (
         ride.assignedDriver = null;
         ride.status = "no_driver_found";
         ride.assignmentExpiresAt = null;
+        ride.dispatchFailureReason = "max_dispatch_attempts_reached";
 
         await ride.save();
 
@@ -349,12 +393,11 @@ export const rejectAssignedRide = async (
         };
     }
 
-
     const excludedDriverIds = ride.attemptedDrivers.map((attempt: any) =>
         String(attempt.driver)
     );
 
-    const filteredCandidates = await findCandidateDriversWithSearchWidening(
+    const candidateSearch = await findCandidateDriversWithSearchWidening(
         {
             lat: ride.pickup.lat,
             lng: ride.pickup.lng,
@@ -364,6 +407,7 @@ export const rejectAssignedRide = async (
         excludedDriverIds
     );
 
+    const filteredCandidates = candidateSearch.drivers;
 
     for (const candidate of filteredCandidates) {
         const reassignedDriver = await Driver.findOneAndUpdate(
@@ -383,7 +427,6 @@ export const rejectAssignedRide = async (
             }
         );
 
-
         if (!reassignedDriver) {
             continue;
         }
@@ -400,6 +443,8 @@ export const rejectAssignedRide = async (
         ride.lastAssignedAt = now;
         ride.assignmentExpiresAt = assignmentExpiresAt;
         ride.assignmentVersion = currentAssignmentVersion + 1;
+        ride.dispatchFailureReason = null;
+
         await ride.save();
 
         await scheduleRideResponseTimeout(
@@ -414,7 +459,6 @@ export const rejectAssignedRide = async (
             assignmentVersion: ride.assignmentVersion,
         });
 
-
         return {
             ride,
             assignedDriver: reassignedDriver,
@@ -423,8 +467,28 @@ export const rejectAssignedRide = async (
     }
 
     ride.assignedDriver = null;
-    ride.status = "searching";
     ride.assignmentExpiresAt = null;
+
+    if (ride.matchingMode === "semantic") {
+        ride.status = "no_driver_found";
+        ride.dispatchFailureReason = candidateSearch.semanticFailureReason;
+
+        await ride.save();
+
+        logDispatchEvent("semantic_match_failed", {
+            rideId: String(ride._id),
+            reason: candidateSearch.semanticFailureReason,
+            eligibleDriverCount: candidateSearch.eligibleDriverCount,
+        });
+
+        return {
+            ride,
+            assignedDriver: null,
+            reassigned: false,
+        };
+    }
+
+    ride.status = "searching";
     await ride.save();
 
     logDispatchEvent("ride_back_to_searching", {
@@ -439,9 +503,8 @@ export const rejectAssignedRide = async (
     };
 };
 
-
 export const getRideById = async (rideId: string) => {
-    return Ride.findById(rideId).populate("assignedDriver")
+    return Ride.findById(rideId).populate("assignedDriver");
 };
 
 export const getActiveRideForDriver = async (driverId: string) => {
@@ -453,17 +516,15 @@ export const getActiveRideForDriver = async (driverId: string) => {
         .populate("assignedDriver");
 };
 
-
-//helper
 const releaseDriverFromRide = async (driverId: string) => {
     await Driver.findByIdAndUpdate(driverId, {
         isAvailable: true,
         availabilityStatus: "available",
         currentRide: null,
     });
-    await updateLiveDriverAvailability(driverId, true);
 
-}
+    await updateLiveDriverAvailability(driverId, true);
+};
 
 export const completeRide = async (rideId: string) => {
     const ride = await Ride.findById(rideId);
@@ -498,12 +559,10 @@ export const completeRide = async (rideId: string) => {
         driverId,
     });
 
-
     return {
         ride,
     };
 };
-
 
 export const cancelRide = async (rideId: string) => {
     const ride = await Ride.findById(rideId);
@@ -546,7 +605,6 @@ export const cancelRide = async (rideId: string) => {
     logDispatchEvent("ride_cancelled", {
         rideId: String(ride._id),
     });
-
 
     return {
         ride,

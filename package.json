@@ -11,6 +11,7 @@
     "worker:ride-timeout": "ts-node-dev --respawn --transpile-only src/workers/rideTimeout.scheduler.worker.ts",
     "simulator:drivers": "ts-node-dev --respawn --transpile-only src/simulator/driverSimulator.ts",
     "reset:loadtest": "ts-node-dev --transpile-only --exit-child src/scripts/resetLoadTestData.ts",
+    "embeddings:queue-missing": "ts-node-dev --transpile-only --exit-child src/scripts/queueMissingDriverEmbeddings.ts",
     "nginx:dev": "docker run --rm -p 8080:8080 -v %cd%/nginx/sirat.conf:/etc/nginx/nginx.conf:ro nginx:alpine",
     "worker:dispatch": "ts-node-dev --respawn --transpile-only src/workers/dispatch.worker.ts",
     "build": "tsc",

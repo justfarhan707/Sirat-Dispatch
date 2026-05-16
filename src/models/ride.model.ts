@@ -71,6 +71,11 @@ const rideSchema = new Schema(
             default: 0,
         },
 
+        dispatchFailureReason: {
+            type: String,
+            default: null,
+        },
+
         attemptedDrivers: [
             {
                 driver: {

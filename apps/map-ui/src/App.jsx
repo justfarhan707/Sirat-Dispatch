@@ -131,6 +131,30 @@ function getRideTone(ride) {
   return "active";
 }
 
+function getDispatchFailureMessage(reason) {
+  if (reason === "no_nearby_drivers") {
+    return "No nearby drivers are online right now. Try standard matching or start the simulator.";
+  }
+
+  if (reason === "no_driver_embeddings") {
+    return "Intelligent matching is not ready for nearby drivers yet. Generate embeddings or try standard matching.";
+  }
+
+  if (reason === "below_similarity_threshold") {
+    return "No strong intelligent match found. Try a broader query or switch to standard matching.";
+  }
+
+  if (reason === "unsupported_sensitive_attribute") {
+    return "We cannot match drivers by personal identity traits. Try language, vehicle type, pet-friendly, airport trips, or standard matching.";
+  }
+
+  if (reason === "max_dispatch_attempts_reached") {
+    return "No driver accepted this request. Try again or switch matching style.";
+  }
+
+  return "No driver found. Try again or use standard matching.";
+}
+
 function getAssignedDriverFromRide(ride) {
   if (!ride?.assignedDriver || typeof ride.assignedDriver === "string") {
     return null;
@@ -328,7 +352,7 @@ function App() {
     }
 
     if (freshRide.status === "no_driver_found") {
-      setNotice("No driver accepted this request. Dispatch stopped after max attempts.");
+      setNotice(getDispatchFailureMessage(freshRide.dispatchFailureReason));
     }
 
     return freshRide;
@@ -514,7 +538,7 @@ function App() {
           : getAssignedDriverFromRide(data.ride)
             ? `${getAssignedDriverFromRide(data.ride).name} got assigned. Watch the map supply drop.`
           : data.ride.status === "no_driver_found"
-            ? "No driver accepted this request. Dispatch stopped after max attempts."
+            ? getDispatchFailureMessage(data.ride.dispatchFailureReason)
             : "No driver was assigned yet. Ride is searching."
       );
 
@@ -582,7 +606,7 @@ function App() {
         data.reassigned
           ? `${data.assignedDriver.name} got reassigned.`
           : data.ride.status === "no_driver_found"
-            ? "No driver accepted this request. Dispatch stopped after max attempts."
+            ? getDispatchFailureMessage(data.ride.dispatchFailureReason)
             : "No replacement driver found. Ride moved back to searching."
       );
 
@@ -1018,7 +1042,15 @@ function App() {
                 </div>
               ) : (
                 <p className="empty-state">
-                  Request a ride and we will show the assigned driver here.
+                  {currentRide?.status === "no_driver_found"
+                    ? getDispatchFailureMessage(currentRide.dispatchFailureReason)
+                    : "Request a ride and we will show the assigned driver here."}
+                </p>
+              )}
+
+              {currentRide?.status === "no_driver_found" && (
+                <p className="status-message warning">
+                  {getDispatchFailureMessage(currentRide.dispatchFailureReason)}
                 </p>
               )}
 
