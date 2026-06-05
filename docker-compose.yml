@@ -141,3 +141,15 @@ services:
     command: run /scripts/dispatch-mixed.k6.js
     depends_on:
       - nginx
+
+  k6-mixed-75:
+    image: grafana/k6:latest
+    profiles:
+      - loadtest
+    environment:
+      BASE_URL: http://nginx:8080
+    volumes:
+      - ./load-tests:/scripts:ro
+    command: run /scripts/dispatch-mixed-75rps.k6.js
+    depends_on:
+      - nginx

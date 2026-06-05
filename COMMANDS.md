@@ -94,6 +94,14 @@ docker compose --profile loadtest run --rm k6-mixed
 
 Runs mixed traffic: mostly `GET /drivers/nearby`, some `POST /rides`.
 
+Mixed dispatch test at 75 RPS:
+
+```powershell
+docker compose --profile loadtest run --rm k6-mixed-75
+```
+
+Runs the same mixed traffic pattern at 75 requests/second.
+
 Nearby drivers read test:
 
 ```powershell

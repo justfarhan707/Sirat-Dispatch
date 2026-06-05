@@ -2,8 +2,7 @@ import { redisCache } from "../config/redis";
 
 
 
-const DRIVER_PROFILE_CACHE_TTL_SECONDS = 60;
-
+const DRIVER_PROFILE_CACHE_TTL_SECONDS = 5 * 60;
 
 
 const getDriverProfileCacheKey = (driverId: string) => {

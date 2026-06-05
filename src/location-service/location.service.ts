@@ -89,13 +89,23 @@ export const findNearbyLiveDrivers = async (
 
     const driverIds = new Set<string>();
 
-    for (const nearbyH3Index of nearbyH3Indexes) {
-        const ids = await locationRedis.smembers(getH3DriversKey(nearbyH3Index));
+    const h3Pipeline = locationRedis.pipeline();
+
+    nearbyH3Indexes.forEach((nearbyH3Index) => {
+        h3Pipeline.smembers(getH3DriversKey(nearbyH3Index));
+    });
+
+    const h3Results = await h3Pipeline.exec();
+
+    h3Results?.forEach(([error, ids]) => {
+        if (error || !Array.isArray(ids)) {
+            return;
+        }
 
         ids.forEach((driverId) => {
-            driverIds.add(driverId);
+            driverIds.add(String(driverId));
         });
-    }
+    });
 
     if (driverIds.size === 0) {
         return [];

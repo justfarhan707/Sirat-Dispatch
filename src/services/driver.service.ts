@@ -90,15 +90,23 @@ export const findNearbyDriversByRing = async (
 
 export const listDriversForConsole = async () => {
     const drivers = await Driver.find({})
-        .select("_id name phone vehicle rating isAvailable availabilityStatus currentRide")
+        .select("_id name phone vehicle rating location isAvailable availabilityStatus currentRide")
         .sort({ createdAt: 1 })
-        .limit(100)
+        .limit(250)
         .lean();
 
     return drivers.sort((a: any, b: any) => {
-        const aNumber = Number(String(a.name).replace(/\D/g, ""));
-        const bNumber = Number(String(b.name).replace(/\D/g, ""));
+        const aName = String(a.name || "");
+        const bName = String(b.name || "");
+        const aZoneOrder = aName.toLowerCase().includes("kurla") ? 1 : 0;
+        const bZoneOrder = bName.toLowerCase().includes("kurla") ? 1 : 0;
 
+        if (aZoneOrder !== bZoneOrder) {
+            return aZoneOrder - bZoneOrder;
+        }
+
+        const aNumber = Number(aName.replace(/\D/g, ""));
+        const bNumber = Number(bName.replace(/\D/g, ""));
         return aNumber - bNumber;
     });
 };

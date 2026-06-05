@@ -13,15 +13,34 @@ dotenv.config();
 
 const MONGO_URI = process.env.MONGO_URI as string;
 
-// Tight Vashi hot-zone bounds for dense demo traffic.
-const VASHI_MIN_LAT = 19.055;
-const VASHI_MAX_LAT = 19.085;
-const VASHI_MIN_LNG = 72.985;
-const VASHI_MAX_LNG = 73.015;
+const DRIVER_COUNT_PER_ZONE = 100;
 
-const getRandomLocation = () => {
-  const lat = VASHI_MIN_LAT + Math.random() * (VASHI_MAX_LAT - VASHI_MIN_LAT);
-  const lng = VASHI_MIN_LNG + Math.random() * (VASHI_MAX_LNG - VASHI_MIN_LNG);
+const ZONES = [
+  {
+    id: "vashi",
+    label: "Vashi",
+    bounds: {
+      minLat: 19.055,
+      maxLat: 19.085,
+      minLng: 72.985,
+      maxLng: 73.015,
+    },
+  },
+  {
+    id: "kurla",
+    label: "Kurla",
+    bounds: {
+      minLat: 19.055,
+      maxLat: 19.085,
+      minLng: 72.87,
+      maxLng: 72.9,
+    },
+  },
+];
+
+const getRandomLocation = (bounds: typeof ZONES[number]["bounds"]) => {
+  const lat = bounds.minLat + Math.random() * (bounds.maxLat - bounds.minLat);
+  const lng = bounds.minLng + Math.random() * (bounds.maxLng - bounds.minLng);
   return { lat, lng };
 };
 
@@ -39,57 +58,62 @@ const seedDrivers = async () => {
 
     console.log("Cleared old drivers and rides");
 
-    const drivers = [];
+    const drivers: any[] = [];
 
-    for (let i = 0; i < 100; i++) {
-      const { lat, lng } = getRandomLocation();
-      const h3Index = H3Service.getIndex(lat, lng);
+    ZONES.forEach((zone, zoneIndex) => {
+      for (let i = 0; i < DRIVER_COUNT_PER_ZONE; i++) {
+        const driverNumber = zoneIndex * DRIVER_COUNT_PER_ZONE + i + 1;
+        const { lat, lng } = getRandomLocation(zone.bounds);
+        const h3Index = H3Service.getIndex(lat, lng);
 
-      drivers.push({
-        name: `Driver ${i + 1}`,
-        phone: `99999${String(i + 1).padStart(4, "0")}`,
-        vehicle: {
-          type: getRandomItem(["bike", "sedan", "suv"]),
-          plateNumber: `MH01-${String(i + 1).padStart(3, "0")}`,
-        },
-        location: {
-          type: "Point",
-          coordinates: [lng, lat],
-        },
-        h3Index,
-        isAvailable: true,
-        rating: Number((4 + Math.random()).toFixed(2)),
-        petFriendly: Math.random() > 0.6,
-        airportTripsCount: Math.floor(Math.random() * 200),
-        languages: getRandomItem([
-          ["English"],
-          ["Hindi"],
-          ["English", "Hindi"],
-          ["Hindi", "Marathi"],
-        ]),
-        serviceTags: getRandomItem([
-          ["quick-response"],
-          ["pet-friendly"],
-          ["airport-experienced"],
-          ["quick-response", "airport-experienced"],
-          ["pet-friendly", "city-rides"],
-          ["airport-experienced", "long-distance"],
-        ]),
-        preferredRideTypes: getRandomItem([
-          ["airport"],
-          ["city-commute"],
-          ["long-distance"],
-          ["airport", "city-commute"],
-        ]),
-        profileText: "",
-        embeddingStatus: "not_started",
-        lastSeen: new Date(),
-      });
-    }
+        drivers.push({
+          name: `${zone.label} Driver ${i + 1}`,
+          phone: `99999${String(driverNumber).padStart(4, "0")}`,
+          vehicle: {
+            type: getRandomItem(["bike", "sedan", "suv"]),
+            plateNumber: `MH01-${String(driverNumber).padStart(3, "0")}`,
+          },
+          location: {
+            type: "Point",
+            coordinates: [lng, lat],
+          },
+          h3Index,
+          isAvailable: true,
+          availabilityStatus: "available",
+          currentRide: null,
+          rating: Number((4 + Math.random()).toFixed(2)),
+          petFriendly: Math.random() > 0.6,
+          airportTripsCount: Math.floor(Math.random() * 200),
+          languages: getRandomItem([
+            ["English"],
+            ["Hindi"],
+            ["English", "Hindi"],
+            ["Hindi", "Marathi"],
+          ]),
+          serviceTags: getRandomItem([
+            ["quick-response"],
+            ["pet-friendly"],
+            ["airport-experienced"],
+            ["quick-response", "airport-experienced"],
+            ["pet-friendly", "city-rides"],
+            ["airport-experienced", "long-distance"],
+          ]),
+          preferredRideTypes: getRandomItem([
+            ["airport"],
+            ["city-commute"],
+            ["long-distance"],
+            ["airport", "city-commute"],
+          ]),
+          profileText: "",
+          embeddingStatus: "not_started",
+          lastSeen: new Date(),
+        });
+      }
+    });
 
     await Driver.insertMany(drivers);
 
-    console.log("Seeded 100 Vashi-zone drivers");
+    console.log(`Seeded ${drivers.length} drivers across Vashi and Kurla`);
     process.exit(0);
   } catch (err) {
     console.error("Seed failed:", err);

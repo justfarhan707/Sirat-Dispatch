@@ -29,7 +29,7 @@ const nearbyReads = new Counter("nearby_reads");
 const rideCreates = new Counter("ride_creates");
 
 export default function () {
-    const shouldCreateRide = Math.random() < 0.1;
+    const shouldCreateRide = Math.random() < 0.05;
 
     if (shouldCreateRide) {
         const payload = JSON.stringify({

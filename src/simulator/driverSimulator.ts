@@ -14,23 +14,44 @@ type SimulatedDriver = {
     lat: number;
     lng: number;
     isAvailable: boolean;
+    zoneId: ZoneId;
 };
+
+type ZoneId = "vashi" | "kurla";
 
 const LOCATION_SERVICE_URL =
     process.env.LOCATION_SERVICE_URL || "http://localhost:4001";
 
 const SIMULATOR_INTERVAL_MS = 3000;
-const MAX_DRIVERS = 100;
+const MAX_DRIVERS = 200;
 const RANDOM_STEP_SIZE = 0.002;
 const TARGET_STEP_SIZE = 0.0014;
 const TARGET_REACHED_DISTANCE = 0.00025;
+const HOT_ZONE_PULL_CHANCE = 0.06;
+const HOT_ZONE_PULL_STEP_SIZE = 0.00045;
 
-// Navi Mumbai-ish movement bounds.
-const BOUNDS = {
-    minLat: 19.055,
-    maxLat: 19.085,
-    minLng: 72.985,
-    maxLng: 73.015,
+const ZONES: Record<ZoneId, {
+    center: { lat: number; lng: number };
+    bounds: { minLat: number; maxLat: number; minLng: number; maxLng: number };
+}> = {
+    vashi: {
+        center: { lat: 19.07, lng: 73.0 },
+        bounds: {
+            minLat: 19.055,
+            maxLat: 19.085,
+            minLng: 72.985,
+            maxLng: 73.015,
+        },
+    },
+    kurla: {
+        center: { lat: 19.0726, lng: 72.8845 },
+        bounds: {
+            minLat: 19.055,
+            maxLat: 19.085,
+            minLng: 72.87,
+            maxLng: 72.9,
+        },
+    },
 };
 
 
@@ -48,21 +69,43 @@ const getDistance = (
     return Math.sqrt(latDistance ** 2 + lngDistance ** 2);
 };
 
+const getRandomLocationInZone = (zoneId: ZoneId) => {
+    const { bounds } = ZONES[zoneId];
+
+    return {
+        lat: bounds.minLat + Math.random() * (bounds.maxLat - bounds.minLat),
+        lng: bounds.minLng + Math.random() * (bounds.maxLng - bounds.minLng),
+    };
+};
+
+const getDriverZone = (driver: SimulatedDriver) => {
+    return ZONES[driver.zoneId];
+};
+
 const moveDriver = (driver: SimulatedDriver): SimulatedDriver => {
+    const zone = getDriverZone(driver);
+    const shouldPullToCenter = Math.random() < HOT_ZONE_PULL_CHANCE;
+
+    if (shouldPullToCenter) {
+        return moveDriverTowardTarget(driver, zone.center, HOT_ZONE_PULL_STEP_SIZE);
+    }
+
     const latStep = (Math.random() - 0.5) * RANDOM_STEP_SIZE;
     const lngStep = (Math.random() - 0.5) * RANDOM_STEP_SIZE;
 
     return {
         ...driver,
-        lat: clamp(driver.lat + latStep, BOUNDS.minLat, BOUNDS.maxLat),
-        lng: clamp(driver.lng + lngStep, BOUNDS.minLng, BOUNDS.maxLng),
+        lat: clamp(driver.lat + latStep, zone.bounds.minLat, zone.bounds.maxLat),
+        lng: clamp(driver.lng + lngStep, zone.bounds.minLng, zone.bounds.maxLng),
     };
 };
 
 const moveDriverTowardTarget = (
     driver: SimulatedDriver,
-    target: { lat: number; lng: number }
+    target: { lat: number; lng: number },
+    stepSize = TARGET_STEP_SIZE
 ): SimulatedDriver => {
+    const zone = getDriverZone(driver);
     const distance = getDistance(driver, target);
 
     if (distance <= TARGET_REACHED_DISTANCE) {
@@ -73,7 +116,7 @@ const moveDriverTowardTarget = (
         };
     }
 
-    const progress = Math.min(TARGET_STEP_SIZE / distance, 1);
+    const progress = Math.min(stepSize / distance, 1);
     const latJitter = (Math.random() - 0.5) * 0.00018;
     const lngJitter = (Math.random() - 0.5) * 0.00018;
 
@@ -81,13 +124,13 @@ const moveDriverTowardTarget = (
         ...driver,
         lat: clamp(
             driver.lat + (target.lat - driver.lat) * progress + latJitter,
-            BOUNDS.minLat,
-            BOUNDS.maxLat
+            zone.bounds.minLat,
+            zone.bounds.maxLat
         ),
         lng: clamp(
             driver.lng + (target.lng - driver.lng) * progress + lngJitter,
-            BOUNDS.minLng,
-            BOUNDS.maxLng
+            zone.bounds.minLng,
+            zone.bounds.maxLng
         ),
     };
 };
@@ -117,17 +160,22 @@ const updateLocationService = async (driver: SimulatedDriver) => {
 
 const loadDriversFromMongo = async (): Promise<SimulatedDriver[]> => {
     const drivers = await Driver.find({})
+        .sort({ createdAt: 1 })
         .limit(MAX_DRIVERS)
         .lean();
 
-    return drivers.map((driver: any) => {
-        const [lng, lat] = driver.location.coordinates;
+    return drivers.map((driver: any, index) => {
+        const zoneId: ZoneId = index < Math.ceil(drivers.length / 2)
+            ? "vashi"
+            : "kurla";
+        const { lat, lng } = getRandomLocationInZone(zoneId);
 
         return {
             driverId: String(driver._id),
             lat,
             lng,
             isAvailable: driver.isAvailable,
+            zoneId,
         };
     });
 };
@@ -176,7 +224,12 @@ const startSimulator = async () => {
         process.exit(0);
     }
 
-    console.log(`Loaded ${drivers.length} drivers into simulator`);
+    const vashiCount = drivers.filter((driver) => driver.zoneId === "vashi").length;
+    const kurlaCount = drivers.filter((driver) => driver.zoneId === "kurla").length;
+
+    console.log(
+        `Loaded ${drivers.length} drivers into simulator (${vashiCount} Vashi, ${kurlaCount} Kurla)`
+    );
 
     // Push initial locations into Location Service.
     await Promise.all(drivers.map(updateLocationService));

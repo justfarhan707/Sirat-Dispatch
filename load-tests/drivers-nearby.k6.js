@@ -6,11 +6,11 @@ export const options = {
     scenarios: {
         nearby_reads: {
             executor: "constant-arrival-rate",
-            rate: 50,
+            rate: 100,
             timeUnit: "1s",
             duration: "1m",
-            preAllocatedVUs: 20,
-            maxVUs: 100,
+            preAllocatedVUs: 60,
+            maxVUs: 180,
         },
     },
     thresholds: {
@@ -27,15 +27,26 @@ const nearbyEmpty = new Counter("nearby_empty");
 export default function () {
     const res = http.get(`${BASE_URL}/drivers/nearby?lat=19.07&lng=73&ring=2`);
 
+    const isJson = String(res.headers["Content-Type"] || "").includes("application/json");
+    let drivers = null;
+
+    if (res.status === 200 && isJson) {
+        try {
+            drivers = res.json();
+        } catch (error) {
+            console.log(`nearby_json_parse_failed status=${res.status} body=${String(res.body).slice(0, 120)}`);
+        }
+    } else {
+        console.log(`nearby_bad_response status=${res.status} content_type=${res.headers["Content-Type"] || "unknown"} body=${String(res.body).slice(0, 120)}`);
+    }
+
     const ok = check(res, {
         "GET /drivers/nearby returned 200": (r) => r.status === 200,
-        "response is array": (r) => Array.isArray(r.json()),
+        "response is array": () => Array.isArray(drivers),
     });
 
     if (ok) {
         nearbyOk.add(1);
-
-        const drivers = res.json();
 
         if (drivers.length === 0) {
             nearbyEmpty.add(1);
